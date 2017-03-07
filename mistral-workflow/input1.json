@@ -1,0 +1,41 @@
+{
+"numa_topology_json": {
+    "parameter_defaults": {
+      "DpdkNoOfQueues": 3,
+      "DpdkInterfacenames": ["ixgbe1", "ixgbe2", "ixgbe3"]
+    },
+    "introspection_data" :
+      {
+        "numa_topology": {
+            "ram": [
+              {"numa_node":0, "size_kb": 2097152},
+              {"numa_node":1, "size_kb": 1048576}
+            ],
+            "cpus": [
+              {"cpu": 0, "numa_node": 0, "thread_siblings": [0,1]},
+              {"cpu": 1, "numa_node": 0, "thread_siblings": [2,3]},
+              {"cpu": 2, "numa_node": 0, "thread_siblings": [4,5]},
+              {"cpu": 3, "numa_node": 0, "thread_siblings": [6,7]},
+              {"cpu": 4, "numa_node": 0, "thread_siblings": [8,9]},
+              {"cpu": 5, "numa_node": 0, "thread_siblings": [10,11]},
+              {"cpu": 6, "numa_node": 0, "thread_siblings": [12,13]},
+              {"cpu": 7, "numa_node": 0, "thread_siblings": [14,15]},
+              {"cpu": 0, "numa_node": 1, "thread_siblings": [16,17]},
+              {"cpu": 1, "numa_node": 1, "thread_siblings": [18,19]},
+              {"cpu": 2, "numa_node": 1, "thread_siblings": [20,21]},
+              {"cpu": 3, "numa_node": 1, "thread_siblings": [22,23]},
+              {"cpu": 4, "numa_node": 1, "thread_siblings": [24,25]},
+              {"cpu": 5, "numa_node": 1, "thread_siblings": [26,27]},
+              {"cpu": 6, "numa_node": 1, "thread_siblings": [28,29]},
+              {"cpu": 7, "numa_node": 1, "thread_siblings": [30,31]}
+            ],
+            "nics": [
+              {"name": "ixgbe2", "numa_node": 0},
+              {"name": "ixgbe4", "numa_node": 1},
+              {"name": "ixgbe1", "numa_node": 0},
+              {"name": "ixgbe3", "numa_node": 1}
+            ]
+        }
+      }
+  }
+}
