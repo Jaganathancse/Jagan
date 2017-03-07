@@ -1,0 +1,7 @@
+let(cpus=> let(root=>$)-> $root.introspection_data.numa_topology.cpus.where($.numa_node in $root.introspection_data.numa_topology.nics.where($.name in $root.parameter_defaults.DpdkInterfacenames).numa_node 
+and not 0 in $.thread_siblings).groupBy($.numa_node).toDict($[0],list($[1].thread_siblings)), nodes_nics_count => let(root=>$)->$root.introspection_data.numa_topology.nics
+.where($.name in $root.parameter_defaults.DpdkInterfacenames).numa_node.groupBy($,$,$.count()).toDict($[0],$[1]), nics_per_core => let(root=>$)->len($root.introspection_data.numa_topology.cpus
+.where($.numa_node in $root.introspection_data.numa_topology.nics.where($.name in $root.parameter_defaults.DpdkInterfacenames).numa_node and not 0 in $.thread_siblings)
+.groupBy($.numa_node).toDict($[0],list($[1].thread_siblings)).values().first()[0]), queue_length => let(root=>$)->$root.parameter_defaults.DpdkNoOfQueues)->$nodes_nics_count.keys()
+.select($cpus[$].take(switch(($nodes_nics_count[$]*$queue_length) mod $nics_per_core > 0 => (int(($nodes_nics_count[$]*$queue_length)/$nics_per_core)+1), 
+($nodes_nics_count[$]*$queue_length) mod $nics_per_core = 0 => int(($nodes_nics_count[$]*$queue_length)/$nics_per_core)))).select($.join(",").replace("(","").replace(")","").replace(" ","")).join(",")
