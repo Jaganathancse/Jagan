@@ -18,4 +18,4 @@ generate_dpdk_cores:
 
     get_dpdk_cores:
       publish:
-        dpdk_cores: <% let(cpus=>$.valid_cpus, nics_count=>$.nodes_nics_count, nics_per_core=> $.nics_per_core, queue_length=>$.queue_length)-> list($nics_count.keys().orderBy($).select($cpus[str($)].take(switch((($nics_count[$]*$queue_length) mod $nics_per_core) >= 1 => (int(($nics_count[$]*$queue_length)/$nics_per_core)+1), (($nics_count[$]*$queue_length) mod $nics_per_core) = 0 => int(($nics_count[$]*$queue_length)/$nics_per_core))).select($.join(",")))).join(",") %>
+        dpdk_cores: <% let(cpus=>$.valid_cpus, nics_count=>$.nodes_nics_count, nics_per_core=> $.nics_per_core, queue_length=>$.queue_length)-> list($nics_count.keys().orderBy($).select($cpus[str($)].take(switch((($nics_count[$]*$queue_length) mod $nics_per_core) > 0 => (int(($nics_count[$]*$queue_length)/$nics_per_core)+1), (($nics_count[$]*$queue_length) mod $nics_per_core) = 0 => int(($nics_count[$]*$queue_length)/$nics_per_core))).select($.join(",")))).join(",") %>
