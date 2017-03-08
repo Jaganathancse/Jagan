@@ -8,14 +8,31 @@ generate_dpdk_cores:
     - numa_topology_json
 
   tasks:
-    get_numa_topology_info:
+    find_numa_nodes:
+      on-success: find_cpus_on_numa_nodes
+      publish:
+        numa_nodes: <% let(root=>$.numa_topology_json)-> $root.introspection_data.numa_topology.nics.where($.name in $root.parameter_defaults.DpdkInterfacenames).groupBy($.numa_node).select($[0]).orderBy($) %>
+
+    find_cpus_on_numa_nodes:
+      on-success: find_nics_count_on_numa_nodes
+      publish:
+         cpus: <% let(root=>$.numa_topology_json, nodes=>$.numa_nodes)-> $root.introspection_data.numa_topology.cpus.where($.numa_node in $nodes and not 0 in $.thread_siblings).groupBy($.numa_node).toDict($[0],list($[1].thread_siblings)) %>
+
+    find_nics_count_on_numa_nodes:
+      on-success: find_nics_per_core
+      publish:
+        nics_count: <% let(root=>$.numa_topology_json)-> $root.introspection_data.numa_topology.nics.where($.name in $root.parameter_defaults.DpdkInterfacenames).groupBy($.numa_node).toDict($[0],$[1].len()) %>
+
+    find_nics_per_core:
+      on-success: find_queue_length
+      publish:
+        nics_per_core: <% let(cpus=>$.cpus)-> len($cpus.values().first()[0]) %>
+
+    find_queue_length:
       on-success: get_dpdk_cores
       publish:
-        valid_cpus: <% let(root=>$.numa_topology_json)-> $root.introspection_data.numa_topology.cpus.where($.numa_node in $root.introspection_data.numa_topology.nics.where($.name in $root.parameter_defaults.DpdkInterfacenames).numa_node and not 0 in $.thread_siblings).groupBy($.numa_node).toDict($[0],list($[1].thread_siblings)) %>
-        nodes_nics_count: <% let(root=>$.numa_topology_json)-> $root.introspection_data.numa_topology.nics.where($.name in $root.parameter_defaults.DpdkInterfacenames).groupBy($.numa_node).toDict($[0],$[1].len()) %>   
-        nics_per_core: <% let(root=>$.numa_topology_json)->len($root.introspection_data.numa_topology.cpus.where($.numa_node in $root.introspection_data.numa_topology.nics.where($.name in $root.parameter_defaults.DpdkInterfacenames).numa_node and not 0 in $.thread_siblings).groupBy($.numa_node).toDict($[0],list($[1].thread_siblings)).values().first()[0]) %>
         queue_length: <% let(root=>$.numa_topology_json)->$root.parameter_defaults.DpdkNoOfQueues %>
 
     get_dpdk_cores:
       publish:
-        dpdk_cores: <% let(cpus=>$.valid_cpus, nics_count=>$.nodes_nics_count, nics_per_core=> $.nics_per_core, queue_length=>$.queue_length)-> list($nics_count.keys().orderBy($).select($cpus[str($)].take(switch((($nics_count[$]*$queue_length) mod $nics_per_core) > 0 => (int(($nics_count[$]*$queue_length)/$nics_per_core)+1), (($nics_count[$]*$queue_length) mod $nics_per_core) = 0 => int(($nics_count[$]*$queue_length)/$nics_per_core))).select($.join(",")))).join(",") %>
+        dpdk_cores: <% let(numa_nodes=>$.numa_nodes, cpus=>$.cpus, nics_count=>$.nics_count, nics_per_core=> $.nics_per_core, queue_length=>$.queue_length)->list($numa_nodes.select($cpus[str($)].take(switch((($nics_count[str($)]*$queue_length) mod $nics_per_core) > 0 => (int(($nics_count[str($)]*$queue_length)/$nics_per_core)+1), (($nics_count[str($)]*$queue_length) mod $nics_per_core) = 0 => int(($nics_count[str($)]*$queue_length)/$nics_per_core))).select($.join(",")))).join(",") %>
