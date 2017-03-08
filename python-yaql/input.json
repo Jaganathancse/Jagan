@@ -1,0 +1,24 @@
+{
+  "parameter_defaults": {
+    "DpdkNoOfQueues": 2,
+    "DpdkInterfacenames": ["ixgbe0"]
+  },
+  "introspection_data": {
+  "numa_topology": {
+      "ram": [
+        {"numa_node":0, "size_kb": 2097152},
+        {"numa_node":1, "size_kb": 1048576}
+      ],
+      "cpus": [
+        {"cpu": 0, "numa_node": 0, "thread_siblings": [0,1]},
+        {"cpu": 1, "numa_node": 0, "thread_siblings": [2,3]},
+        {"cpu": 0, "numa_node": 1, "thread_siblings": [16,17]},
+        {"cpu": 1, "numa_node": 1, "thread_siblings": [18,19]}
+      ],
+      "nics": [
+        {"name": "ixgbe0", "numa_node": 0},
+        {"name": "ixgbe1", "numa_node": 1}
+      ]
+    }
+  }
+}
