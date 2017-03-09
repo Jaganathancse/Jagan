@@ -1,0 +1,54 @@
+---
+version: '2.0'
+
+nodes_with_profile:
+  description: Find nodes with a specific profile
+  input:
+    - profile
+    - plan: overcloud
+    - queue_name: tripleo
+
+  task-defaults:
+    on-error: send_message
+
+  tasks:
+    get_available_nodes:
+      action: ironic.node_list maintenance=False
+      on-success: get_nodes_for_profile
+      on-error: set_status_failed_get_available_nodes
+      publish:
+        available_nodes: <% task(get_available_nodes).result.where($.provision_state = 'available').uuid %>
+
+    set_status_failed_get_available_nodes:
+      on-success: send_message
+      publish:
+        status: FAILED
+        message: <% task(get_available_nodes).result %>
+
+    get_nodes_for_profile:
+      with-items: node_uuid in <% $.available_nodes %>
+      action: ironic.node_get node_id=<% $.node_uuid %>
+      on-error: get_nodes_for_profile_failed
+      publish:
+        matching_nodes: <% let(profile => concat("profile:", $.profile)) -> task(get_nodes_for_profile).result.where($profile in $.properties.capabilities).uuid %>
+
+    get_nodes_for_profile_failed:
+      on-success: send_message
+      publish:
+        status: FAILED
+        message: <% task(get_nodes_for_profile).result %>
+
+    send_message:
+      action: zaqar.queue_post
+      retry: count=5 delay=1
+      input:
+        queue_name: <% $.queue_name %>
+        messages:
+          body:
+            type: tripleo.baremetal.v1.nodes_with_profile
+            payload:
+              status: <% $.get('status', 'FAILED') %>
+              message: <% $.get('message', '') %>
+              execution: <% execution() %>
+      on-success:
+        - fail: <% $.get('status') = "FAILED" %>

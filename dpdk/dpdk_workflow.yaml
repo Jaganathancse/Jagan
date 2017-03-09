@@ -1,0 +1,23 @@
+---
+version: '2.0'
+
+get_introspection_data:
+  description: Get introspection data
+  type: direct
+  input:
+    - profile
+
+  tasks:
+    get_nodes_for_profile:
+      workflow: nodes_with_profile
+      input:
+        profile: <% $.profile %>
+      on-success: get_introspection_data_on_node
+      publish:
+        profile_nodes: <% task(get_nodes_for_profile).result %>
+
+    get_introspection_data_on_node:
+      with-items: node_uuid in <% $.profile_nodes.matching_nodes %>
+      action: baremetal_introspection.get_data uuid=<% $.node_uuid %>
+      publish:
+        nodes_json: <% let(nodes=>$.profile_nodes.matching_nodes, introspection_data=>task(get_introspection_data_on_node).result)->$nodes.toDict($,$introspection_data[$nodes.indexOf($)]) %>
