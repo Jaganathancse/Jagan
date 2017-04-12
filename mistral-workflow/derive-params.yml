@@ -1,0 +1,54 @@
+---
+version: '2.0'
+name: tripleo.derive_params.v1
+description: TripleO Workflows to derive deployment parameters from the introspected data
+
+workflows:
+
+  derive_parameters:
+    description: The main workflow for deriving parameters from the introspected data
+
+    input:
+      - plan: overcloud
+      - queue_name: tripleo
+
+    tasks:
+      get_flattened_parameters:
+        action: tripleo.parameters.get_flatten
+        #publish:
+        #  flatten_data: <% task(get_flattened_parameters).result %>
+        on-success: find_roles
+        on-error: set_status_failed_get_flattended_parameters
+
+      find_roles:
+        action: std.noop
+        publish:
+          role_name_list: <% let(heat_tree => task(get_flattened_parameters).result.heat_resource_tree) -> $heat_tree.parameters.role_data.Value.keys().where($heat_tree.parameters.get(concat($,'Count')).Default > 0) %>
+
+      set_status_failed_get_flattended_parameters:
+        on-success: send_message
+        publish:
+          status: FAILED
+          message: <% task(get_flattened_parameters).result %>
+
+      #set_status_failed_for_each_role:
+      #  on-success: send_message
+      #  publish:
+      #    status: FAILED
+          #message: <% task(for_each_role).result %>
+
+      send_message:
+        action: zaqar.queue_post
+        retry: count=5 delay=1
+        input:
+          queue_name: <% $.queue_name %>
+          messages:
+            body:
+              type: tripleo.derive_params.v1.derive_parameters
+              payload:
+                status: <% $.get('status', 'FAILED') %>
+                message: <% $.get('message', '') %>
+                execution: <% execution() %>
+        on-success:
+          - fail: <% $.get('status') = "FAILED" %>
+
