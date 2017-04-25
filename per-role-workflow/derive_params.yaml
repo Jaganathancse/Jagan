@@ -1,0 +1,91 @@
+---
+version: '2.0'
+name: tripleo.derive_params.v1
+description: TripleO Workflows to derive deployment parameters from the introspected data
+
+workflows:
+
+  derive_parameters_per_role:
+    description: >
+      Workflow which runs per role to validate the introspection data on the nodes assigned to role.
+      Once introspection data is fetched, this worklow will trigger the actual derive parameters workflow
+
+    input:
+      - role_name
+      - mistral_environment_parameters
+      - heat_resource_tree
+      - queue_name: tripleo
+
+    tasks:
+      # Add fetching introspection workflow, which will take care of
+      # 1) profile and flavor based mapping
+      # 2) Nova placement api based mapping
+      get_flavor_name:
+        action: std.noop
+        on-success: get_profile_name
+        on-error: set_status_failed_get_flavor_name
+        publish:
+          flavor_name: <% $.heat_resource_tree.parameters.get(concat('Overcloud', $.role_name, 'Flavor')).get('Default')  %>
+
+      get_profile_name:
+        action: tripleo.parameters.get_profile_name flavor_name=<% $.flavor_name %>
+        on-success: get_profile_node
+        on-error: set_status_failed_get_profile_name
+        publish:
+          profile_name: <% task(get_profile_name).result %>
+
+      get_profile_node:
+        on-success: fetch_introspection_data
+        on-error: set_status_failed_get_profile_node
+        workflow: tripleo.baremetal.v1.nodes_with_profile
+        input:
+          profile: <% $.profile_name %>
+          queue_name: <% $.queue_name %>
+        publish:
+          profile_node_uuid: <% task(get_profile_node).result.matching_nodes.first() %>
+
+      fetch_introspection_data:
+        on-success: send_message
+        on-error: set_status_failed_fetch_introspection_data
+        action: baremetal_introspection.get_data uuid=<% $.profile_node_uuid %>
+        publish:
+          introspection_data: <% task(fetch_introspection_data).result %>
+
+      set_status_failed_get_flavor_name:
+        on-success: send_message
+        publish:
+          status: FAILED
+          message: <% task(get_flavor_name).result %>
+
+      set_status_failed_get_profile_name:
+        on-success: send_message
+        publish:
+          status: FAILED
+          message: <% task(get_profile_name).result %>
+
+      set_status_failed_get_profile_node:
+        on-success: send_message
+        publish:
+          status: FAILED
+          message: <% task(get_profile_node).result %>
+
+      set_status_failed_fetch_introspection_data:
+        on-success: send_message
+        publish:
+          status: FAILED
+          message: <% task(fetch_introspection_data).result %>
+
+      send_message:
+        action: zaqar.queue_post
+        retry: count=5 delay=1
+        input:
+          queue_name: <% $.queue_name %>
+          messages:
+            body:
+              type: tripleo.derive_params.v1.derive_parameters_per_role
+              payload:
+                status: <% $.get('status', 'FAILED') %>
+                message: <% $.get('message', '') %>
+                execution: <% execution() %>
+        on-success:
+          - fail: <% $.get('status') = "FAILED" %>
