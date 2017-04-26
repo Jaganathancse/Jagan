@@ -1,0 +1,62 @@
+---
+version: '2.0'
+name: tripleo.derive_params.v1
+description: TripleO Workflows to derive deployment parameters from the introspected data
+
+workflows:
+
+  dpdk_derive_parameters:
+    description: DPDK derive parameters workflow
+
+    input:
+      - role_name
+      - introspection_data
+      - mistral_environment_parameters
+      - heat_resource_tree
+      - queue_name: tripleo
+
+    tasks:
+      find_numa_nodes:
+        on-success: find_cpus_on_numa_nodes
+        publish:
+          numa_nodes: <% let(root=>$.introspection_data.numa_topology,  interface=> $.introspection_data.parameter_defaults)-> $root.nics.where($.name in $interface.DpdkInterfacenames).groupBy($.numa_node).select($[0]).orderBy($) %>
+
+      find_cpus_on_numa_nodes:
+        on-success: find_nics_count_on_numa_nodes
+        publish:
+          cpus: <% let(root=>$.introspection_data.numa_topology, nodes=>$.numa_nodes)-> $root.cpus.where($.numa_node in $nodes and not 0 in $.thread_siblings).groupBy($.numa_node).toDict($[0],list($[1].thread_siblings)) %>
+
+      find_nics_count_on_numa_nodes:
+        on-success: find_nics_per_core
+        publish:
+          nics_count: <% let(root=>$.introspection_data.numa_topology, interface=> $.introspection_data.parameter_defaults)-> $root.nics.where($.name in $interface.DpdkInterfacenames).groupBy($.numa_node).toDict($[0],$[1].len()) %>
+
+      find_nics_per_core:
+        on-success: find_queue_length
+        publish:
+          nics_per_core: <% let(cpus=>$.cpus)-> len($cpus.values().first()[0]) %>
+
+      find_queue_length:
+        on-success: find_dpdk_pmd_cores
+        publish:
+          queue_length: <% let(interface=>$.introspection_data.parameter_defaults)->$interface.DpdkNoOfQueues %>
+
+      find_dpdk_pmd_cores:
+        on-success: send_message
+        publish:
+          dpdk_pmd_cores: <% let(numa_nodes=>$.numa_nodes, cpus=>$.cpus, nics_count=>$.nics_count, nics_per_core=> $.nics_per_core, queue_length=>$.queue_length)->list($numa_nodes.select($cpus[str($)].take(switch((($nics_count[str($)]*$queue_length) mod $nics_per_core) > 0 => (int(($nics_count[str($)]*$queue_length)/$nics_per_core)+1), (($nics_count[str($)]*$queue_length) mod $nics_per_core) = 0 => int(($nics_count[str($)]*$queue_length)/$nics_per_core))).select($.join(",")))).join(",") %>
+
+      send_message:
+        action: zaqar.queue_post
+        retry: count=5 delay=1
+        input:
+          queue_name: <% $.queue_name %>
+          messages:
+            body:
+              type: tripleo.derive_params.v1.derive_parameters_per_role
+              payload:
+                status: <% $.get('status', 'FAILED') %>
+                message: <% $.get('message', '') %>
+                execution: <% execution() %>
+        on-success:
+          - fail: <% $.get('status') = "FAILED" %>           

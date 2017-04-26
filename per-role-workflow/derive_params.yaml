@@ -5,6 +5,72 @@ description: TripleO Workflows to derive deployment parameters from the introspe
 
 workflows:
 
+  derive_parameters:
+    description: The main workflow for deriving parameters from the introspected data
+
+    input:
+      - plan: overcloud
+      - queue_name: tripleo
+
+    tasks:
+      get_flattened_parameters:
+        action: tripleo.parameters.get_flatten
+        on-success: get_roles
+        on-error: set_status_failed_get_flattened_parameters
+        publish:
+          environment_parameters: <% task(get_flattened_parameters).result.mistral_environment_parameters %>
+          heat_resource_tree: <% task(get_flattened_parameters).result.heat_resource_tree %>
+
+      get_roles:
+        on-success: for_each_role
+        publish:
+          #role_name_list: <% $.heat_resource_tree.resources.values().where($.get('type', '') = 'OS::Heat::ResourceGroup').select($.name) %>
+          role_name_list: <% let(heat_resource_tree => $.heat_resource_tree) -> $heat_resource_tree.parameters.role_data.Value.keys().where($heat_resource_tree.parameters.get(concat($,'Count')).Default > 0) %>
+
+      # Excute the basic preparation workflow for each role (checking and getting introspection data)
+      for_each_role:
+        #Filtered role for only Compute role,Controler role fails in getting flavor name (OvercloudControlFlavor)
+        with-items: role_name in <% $.role_name_list.where($="Compute") %>
+        concurrency: 1
+        workflow: tripleo.derive_params.v1.derive_parameters_per_role
+        input:
+          role_name: <% $.role_name %>           
+          environment_parameters: <% $.environment_parameters %>
+          heat_resource_tree: <% $.heat_resource_tree %>
+          queue_name: <% $.queue_name %>
+        on-success: send_message
+        on-error: set_status_failed_for_each_role
+        publish:
+          roles_info: <% task(for_each_role).result %>
+
+      set_status_failed_get_flattened_parameters:
+        on-success: send_message
+        publish:
+          status: FAILED
+          message: <% task(get_flattened_parameters).result %>
+
+      set_status_failed_for_each_role:
+        on-success: send_message
+        publish:
+          status: FAILED
+          message: <% task(for_each_role).result %>
+
+      send_message:
+        action: zaqar.queue_post
+        retry: count=5 delay=1
+        input:
+          queue_name: <% $.queue_name %>
+          messages:
+            body:
+              type: tripleo.derive_params.v1.derive_parameters
+              payload:
+                status: <% $.get('status', 'FAILED') %>
+                message: <% $.get('message', '') %>
+                execution: <% execution() %>
+        on-success:
+          - fail: <% $.get('status') = "FAILED" %>
+
+
   derive_parameters_per_role:
     description: >
       Workflow which runs per role to validate the introspection data on the nodes assigned to role.
@@ -12,7 +78,7 @@ workflows:
 
     input:
       - role_name
-      - mistral_environment_parameters
+      - environment_parameters
       - heat_resource_tree
       - queue_name: tripleo
 
