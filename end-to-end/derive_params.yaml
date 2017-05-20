@@ -1,0 +1,409 @@
+---
+version: '2.0'
+name: tripleo.derive_params.v1
+description: TripleO Workflows to derive deployment parameters from the introspected data
+
+workflows:
+
+  derive_parameters:
+    description: The main workflow for deriving parameters from the introspected data
+
+    input:
+      - plan: overcloud
+      - queue_name: tripleo
+
+    tasks:
+      get_flattened_parameters:
+        action: tripleo.parameters.get_flatten container=<% $.plan %>
+        publish:
+          environment_parameters: <% task().result.mistral_environment_parameters %>
+          heat_resource_tree: <% task().result.heat_resource_tree %>
+        on-success:
+          - get_roles: <% $.environment_parameters and $.heat_resource_tree %>
+          - set_status_failed_get_flattened_parameters: <% (not $.environment_parameters) or (not $.heat_resource_tree) %>
+        on-error: set_status_failed_get_flattened_parameters
+
+      get_roles:
+        publish:
+          role_name_list: <% $.heat_resource_tree.resources.values().where($.get('type', '') = 'OS::Heat::ResourceGroup').select($.name) %>
+        on-success:
+          - get_valid_roles: <% $.role_name_list %>
+          - set_status_failed_get_roles: <% not $.role_name_list %>
+
+      # Obtain only the roles which has count > 0, by checking <RoleName>Count parameter, like ComputeCount
+      get_valid_roles:
+        publish:
+          valid_role_name_list: <% let(hr => $.heat_resource_tree.parameters) -> $.role_name_list.where(int($hr.get(concat($, 'Count'), {}).get('default', 0)) > 0) %>
+        on-success:
+          - for_each_role: <% $.valid_role_name_list %>
+          - set_status_failed_get_valid_roles: <% not $.valid_role_name_list %>
+
+      # Excute the basic preparation workflow for each role to get introspection data
+      for_each_role:
+        with-items: role_name in <% $.valid_role_name_list %>
+        concurrency: 1
+        workflow: _derive_parameters_per_role
+        input:
+          role_name: <% $.role_name %>
+          environment_parameters: <% $.environment_parameters %>
+          heat_resource_tree: <% $.heat_resource_tree %>
+        on-success: send_message
+        on-error: set_status_failed_for_each_role
+
+      set_status_failed_get_flattened_parameters:
+        on-success: send_message
+        publish:
+          status: FAILED
+          message: <% task(get_flattened_parameters).result %>
+
+      set_status_failed_get_roles:
+        on-success: send_message
+        publish:
+          status: FAILED
+          message: "Unable to determine the list of roles in the deployment plan"
+
+      set_status_failed_get_valid_roles:
+        on-success: send_message
+        publish:
+          status: FAILED
+          message: 'Unable to determine the list of valid roles in the deployment plan.'
+
+      set_status_failed_for_each_role:
+        on-success: send_message
+        publish:
+          status: FAILED
+          message: <% task(for_each_role).result.select(dict('role_name' => $.role_name, 'status' => $.status, 'message' => $.message)) %>
+
+      send_message:
+        action: zaqar.queue_post
+        retry: count=5 delay=1
+        input:
+          queue_name: <% $.queue_name %>
+          messages:
+            body:
+              type: tripleo.derive_params.v1.derive_parameters
+              payload:
+                status: <% $.get('status', 'SUCCESS') %>
+                message: <% $.get('message', '') %>
+                execution: <% execution() %>
+        on-success:
+          - fail: <% $.get('status') = 'FAILED' %>
+
+
+  _derive_parameters_per_role:
+    description: >
+      Workflow which runs per role to get the introspection data on the first matching node assigned to role.
+      Once introspection data is fetched, this worklow will trigger the actual derive parameters workflow
+    input:
+      - role_name
+      - environment_parameters
+      - heat_resource_tree
+
+    tasks:
+      get_role_features:
+        workflow: get_role_features
+        input:
+          role_name: <% $.role_name %>
+          heat_resource_tree: <% $.heat_resource_tree %>
+          queue_name: ''
+        publish:
+          role_features: <% task().result.get('role_features', []) %>
+        on-success:
+          # Continue only if there are features associated with this role. Otherwise, we're done.
+          - get_flavor_name: <% $.role_features %>
+        on-error: set_status_failed_get_role_features
+
+      # Getting introspection data workflow, which will take care of
+      # 1) profile and flavor based mapping
+      # 2) Nova placement api based mapping
+      # Currently we have implemented profile and flavor based mapping
+      # TODO-Nova placement api based mapping is pending, we will enchance it later.
+      get_flavor_name:
+        publish:
+          flavor_name: <% let(param_name => concat('Overcloud', $.role_name, 'Flavor').replace('OvercloudControllerFlavor', 'OvercloudControlFlavor')) -> $.heat_resource_tree.parameters.get($param_name, {}).get('default', '') %>
+        on-success:
+          - get_profile_name: <% $.flavor_name %>
+          - set_status_failed_get_flavor_name: <% not $.flavor_name %>
+
+      get_profile_name:
+        action: tripleo.parameters.get_profile_of_flavor flavor_name=<% $.flavor_name %>
+        publish:
+          profile_name: <% task().result %>
+        on-success: get_profile_node
+        on-error: set_status_failed_get_profile_name
+
+      get_profile_node:
+        workflow: tripleo.baremetal.v1.nodes_with_profile
+        input:
+          profile: <% $.profile_name %>
+        publish:
+          profile_node_uuid: <% task().result.matching_nodes.first('') %>
+        on-success:
+          - get_introspection_data: <% $.profile_node_uuid %>
+          - set_status_failed_no_matching_node_get_profile_node: <% not $.profile_node_uuid %>
+        on-error: set_status_failed_on_error_get_profile_node
+
+      get_introspection_data:
+        on-error: set_status_failed_get_introspection_data
+        action: baremetal_introspection.get_data uuid=<% $.profile_node_uuid %>
+        publish:
+          introspection_data: <% task().result %>
+        on-success:
+          - get_dpdk_derive_params: <% $.role_features.any("DPDK") %>
+
+      get_dpdk_derive_params:
+        workflow: _dpdk_derive_params
+        input:
+          introspection_data: <% $.introspection_data %>
+          environment_parameters: <% $.environment_parameters %>
+          heat_resource_tree: <% $.heat_resource_tree %>
+        publish:
+          dpdk_parameters: <% task().result %>
+        on-error: set_status_failed_get_dpdk_derive_params
+        # TODO-Follow up patches workflows will actually be used here to derive parameters for each role
+
+      set_status_failed_get_role_features:
+        publish:
+          role_name: <% $.role_name %>
+          status: FAILED
+          message: <% task(get_role_features).result %>
+        on-success: fail
+
+      set_status_failed_get_flavor_name:
+        publish:
+          role_name: <% $.role_name %>
+          status: FAILED
+          message: <% "Unable to determine flavor for role '{0}'".format($.role_name) %>
+        on-success: fail
+
+      set_status_failed_get_profile_name:
+        publish:
+          role_name: <% $.role_name %>
+          status: FAILED
+          message: <% task(get_profile_name).result %>
+        on-success: fail
+
+      set_status_failed_no_matching_node_get_profile_node:
+        publish:
+          role_name: <% $.role_name %>
+          status: FAILED
+          message: <% "Unable to determine matching node for profile '{0}'".format($.profile_name) %>
+        on-success: fail
+
+      set_status_failed_on_error_get_profile_node:
+        publish:
+          role_name: <% $.role_name %>
+          status: FAILED
+          message: <% task(get_profile_node).result %>
+        on-success: fail
+
+      set_status_failed_get_introspection_data:
+        publish:
+          role_name: <% $.role_name %>
+          status: FAILED
+          message: <% task(get_introspection_data).result %>
+        on-success: fail
+
+      set_status_failed_get_dpdk_derive_params:
+        publish:
+          role_name: <% $.role_name %>
+          status: FAILED
+          message: <% task(get_dpdk_derive_params).result %>
+        on-success: fail
+
+
+  get_role_features:
+    description: |
+      Workflow that determines the list of derived parameter features (DPDK,
+      HCI, etc.) for a role based on the services assigned to the role.
+
+    input:
+      - role_name
+      - heat_resource_tree
+      - queue_name: tripleo
+
+    tasks:
+      get_resource_chains:
+        publish:
+          resource_chains: <% $.heat_resource_tree.resources.values().where($.get('type', '') = 'OS::Heat::ResourceChain') %>
+        on-success:
+          - get_role_service: <% $.resource_chains %>
+          - set_status_failed_get_resource_chains: <% not $.resource_chains %>
+
+      get_role_service:
+        publish:
+          role_service: <% let(chain_name => concat($.role_name, 'ServiceChain'))-> $.heat_resource_tree.resources.values().where($.name = $chain_name).first({}) %>
+        on-success:
+          - get_service_chain: <% $.role_service %>
+          - set_status_failed_get_role_service: <% not $.role_service %>
+
+      get_service_chain:
+        publish:
+          service_chain: <% let(resources => $.role_service.resources)-> $.resource_chains.where($resources.contains($.id)).first('') %>
+        on-success:
+          - get_services: <% $.service_chain %>
+          - set_status_failed_get_service_chain: <% not $.service_chain %>
+
+      get_services:
+        publish:
+          services: <% let(resources => $.heat_resource_tree.resources)-> $.service_chain.resources.select($resources.get($)) %>
+        on-success:
+          - check_features: <% $.services %>
+          - set_status_failed_get_services: <% not $.services %>
+
+      check_features:
+        on-success: build_feature_dict
+        publish:
+          # The role supports the DPDK feature if the NeutronDpdkCoreList parameter is present.
+          dpdk: <% $.services.any($.get('parameters', []).contains('NeutronDpdkCoreList')) %>
+
+          # The role supports the HCI feature if it includes both NovaCompute and CephOSD services.
+          hci: <% $.services.any($.get('type', '').endsWith('::NovaCompute')) and $.services.any($.get('type', '').endsWith('::CephOSD')) %>
+
+      build_feature_dict:
+        on-success: filter_features
+        publish:
+          feature_dict: <% dict(DPDK => true, HCI => $.hci) %>
+
+      filter_features:
+        on-success: finish
+        publish:
+          # The list of features that are enabled (i.e. are true in the feature_dict).
+          role_features: <% let(feature_dict => $.feature_dict)-> $feature_dict.keys().where($feature_dict[$]) %>
+
+      finish:
+        on-success:
+          - send_message: <% $.queue_name %>
+          - fail: <% not $.queue_name and $.get('status') = 'FAILED' %>
+
+      send_message:
+        action: zaqar.queue_post
+        retry: count=5 delay=1
+        input:
+          queue_name: <% $.queue_name %>
+          messages:
+            body:
+              type: tripleo.derive_params.v1.get_role_features
+              payload:
+                status: <% $.get('status', 'SUCCESS') %>
+                message: <% $.get('message', '') %>
+                execution: <% execution() %>
+                role_features: <% $.get('role_features', []) %>
+        on-success:
+          - fail: <% $.get('status') = 'FAILED' %>
+
+      set_status_failed_get_resource_chains:
+        on-success: finish
+        publish:
+          status: FAILED
+          message: <% 'Unable to locate any resource chains in the heat resource tree' %>
+
+      set_status_failed_get_role_service:
+        on-success: finish
+        publish:
+          status: FAILED
+          message: <% "Unable to determine the service chain resource for role '{0}'".format($.role_name) %>
+
+      set_status_failed_get_service_chain:
+        on-success: finish
+        publish:
+          status: FAILED
+          message: <% "Unable to determine the service chain for role '{0}'".format($.role_name) %>
+
+      set_status_failed_get_services:
+        on-success: finish
+        publish:
+          status: FAILED
+          message: <% "Unable to determine list of services for role '{0}'".format($.role_name) %>
+
+
+  _dpdk_derive_params:
+    description: >
+      Workflow to derive parameters for DPDK service.
+    input:
+      - introspection_data
+      - environment_parameters
+      - heat_resource_tree
+      - no_of_queue_per_interface: 2
+
+    output:
+      dpdk_core_list: <% $.get('dpdk_core_list', '') %>
+
+    tasks:
+      get_dpdk_nics:
+        publish:
+          nics: <% let(interface=> ['eth0', 'lo']) -> $.introspection_data.numa_topology.nics.where($.name in $interface) %>
+        on-success:
+          - get_numa_nodes: <% $.nics %>
+          - set_status_failed_get_dpdk_nics: <% not $.nics %>
+
+      get_numa_nodes:
+        publish:
+          numa_nodes: <% $.nics.groupBy($.numa_node).select($[0]).orderBy($) %>
+        on-success:
+          - get_cpus_on_numa_nodes: <% $.numa_nodes %>
+          - set_status_failed_get_numa_nodes: <% not $.numa_nodes %>
+
+      get_cpus_on_numa_nodes:
+        publish:
+          #cpus: <% let(nt => $.introspection_data.numa_topology, nodes => $.numa_nodes)-> $nt.cpus.where($.numa_node in $nodes and not 0 in $.thread_siblings).groupBy($.numa_node).toDict($[0],list($[1].thread_siblings)) %>
+         cpus: <% let(nt => $.introspection_data.numa_topology, nodes => $.numa_nodes)-> $nt.cpus.where($.numa_node in $nodes).groupBy($.numa_node).toDict($[0],list($[1].thread_siblings)) %>
+        on-success:
+          - get_nics_count_on_numa_nodes: <% $.cpus %>
+          - set_status_failed_get_cpus_on_numa_nodes: <% not $.cpus %>
+
+      get_nics_count_on_numa_nodes:
+        publish:
+          nics_count: <% $.nics.groupBy($.numa_node).toDict($[0],$[1].len()) %>
+        on-success:
+          - get_nics_per_core: <% $.nics_count %>
+          - set_status_failed_get_nics_count_on_numa_nodes: <% not $.nics_count %>
+
+      get_nics_per_core:
+        publish:
+          nics_per_core: <% len($.cpus.values().first()[0]) %>
+        on-success:
+          - get_dpdk_core_list: <% $.nics_per_core %>
+          - set_status_failed_get_nics_per_core: <% not $.nics_per_core %>
+
+      get_dpdk_core_list:
+        publish:
+          dpdk_core_list: <% let(cpus => $.cpus, nics_count => $.nics_count, queue_length => $.no_of_queue_per_interface, nics_per_core => $.nics_per_core, nics_count => $.nics_count) -> list($.numa_nodes.select($cpus[str($)].take(switch((($nics_count[str($)]*$queue_length) mod $nics_per_core) > 0 => (int(($nics_count[str($)]*$queue_length)/$nics_per_core)+1), (($nics_count[str($)]*$queue_length) mod $nics_per_core) = 0 => int(($nics_count[str($)]*$queue_length)/$nics_per_core))).select($.join(",")))).join(",") %>
+        on-success:
+          - set_status_failed_get_dpdk_core_list: <% not $.dpdk_core_list %>
+
+      set_status_failed_get_dpdk_nics:
+        publish:
+          status: FAILED
+          message: 'Unable to determine DPDK NICs'
+        on-success: fail
+
+      set_status_failed_get_numa_nodes:
+        publish:
+          status: FAILED
+          message: 'Unable to determine numa nodes for DPDK NICs'
+        on-success: fail
+
+      set_status_failed_get_cpus_on_numa_nodes:
+        publish:
+          status: FAILED
+          message: 'Unable to determine get CPUs on NUMA nodes of DPKD NICs'
+        on-success: fail
+
+      set_status_failed_get_nics_count_on_numa_nodes:
+        publish:
+          status: FAILED
+          message: 'Unable to determine NICs count on NUMA nodes'
+        on-success: fail
+
+      set_status_failed_get_nics_per_core:
+        publish:
+          status: FAILED
+          message: 'Unable to determine NICs per core'
+        on-success: fail
+
+      set_status_failed_get_dpdk_core_list:
+        publish:
+          status: FAILED
+          message: 'Unable to determine DPDK core list'
+        on-success: fail
