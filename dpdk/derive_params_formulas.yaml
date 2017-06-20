@@ -13,15 +13,11 @@ workflows:
       - plan
       - role_name
       - introspection_data
-      - environment_parameters
-      - heat_resource_tree
       - user_inputs
       - mtu_default: 1500
 
     output:
-      dpdk_core_list: <% $.get('dpdk_core_list', '') %>
-      dpdk_socket_memory: <% $.get('dpdk_socket_memory', '') %>
-      dpdk_memory_channels: <% $.get('dpdk_memory_channels', '') %>      
+      dpdk_parameters: <% dict('NeutronDpdkCoreList' => $.get('dpdk_core_list', ''), 'NeutronDpdkSocketMemory' => $.get('dpdk_socket_memory', ''), 'NeutronDpdkMemoryChannels' => $.get('dpdk_memory_channels', '')) %>
       status: <% $.get('status', 'SUCCESS) %>
       message: <% $.get('message', '') %>
 
@@ -150,104 +146,246 @@ workflows:
           message: <% task(get_network_config).result %>
         on-success: fail
 
-     set_status_failed_get_interfaces_info:
+      set_status_failed_get_interfaces_info:
         publish:
           status: FAILED
-          message: 'Unable to determine interfaces in introspection data'
+          message: <% "Unable to determine interfaces in introspection data for role '{0}'".format($.role_name) %>
         on-success: fail
 
       set_status_failed_get_dpdk_interfaces_info:
         publish:
           status: FAILED
-          message: 'Unable to determine DPDK interfaces information'
+          message: <% "Unable to determine DPDK interfaces information for role '{0}'".format($.role_name) %>
         on-success: fail
 
       set_status_failed_get_dpdk_interface_list:
         publish:
           status: FAILED
-          message: "Unable to determine DPDK interfaces"
+          message: <% "Unable to determine DPDK interfaces for role '{0}'".format($.role_name) %>
         on-success: fail
 
       set_status_failed_get_dpdk_nics_numa_info:
         publish:
           status: FAILED
-          message: "Unable to determine NUMA information for DPDK NIC's"
+          message: <% "Unable to determine DPDK NIC's NUMA information for role '{0}'".format($.role_name) %>
         on-success: fail
 
       set_status_failed_get_dpdk_nics_numa_nodes:
         publish:
           status: FAILED
-          message: "Unable to determine numa nodes for DPDK NIC's"
-        on-success: fail
-
-      set_status_failed_get_dpdk_nics_numa_nodes:
-        publish:
-          status: FAILED
-          message: "Unable to determine numa nodes for DPDK NIC's"
+          message: <% "Unable to determine DPDK NIC's numa nodes for role '{0}'".format($.role_name) %>
         on-success: fail
 
       set_status_failed_get_cpus:
         publish:
           status: FAILED
-          message: "Unable to determine CPU's on NUMA nodes of DPDK NIC's"
+          message: <% "Unable to determine CPU's on NUMA nodes of DPDK NIC's for role '{0}'".format($.role_name) %>
         on-success: fail
 
       set_status_failed_get_min_thread_on_numa_nodes:
         publish:
           status: FAILED
-          message: 'Unable to determine min thread on NUMA nodes'
+          message: <% "Unable to determine min thread on NUMA nodes for role '{0}'".format($.role_name) %>
         on-success: fail
 
       set_status_failed_get_available_cpus:
         publish:
           status: FAILED
-          message: "Unable to determine available CPU's on NUMA nodes of DPDK NIC's"
+          message: <% "Unable to determine available CPU's on NUMA nodes of DPDK NIC's for role '{0}'".format($.role_name) %>
         on-success: fail
 
       set_status_failed_get_threads_per_core:
         publish:
           status: FAILED
-          message: "Unable to determine threads per core"
+          message: <% "Unable to determine threads per core for role '{0}'".format($.role_name) %>
         on-success: fail
 
       set_status_failed_get_dpdk_core_list:
         publish:
           status: FAILED
-          message: 'Unable to determine DPDK core list'
+          message: <% "Unable to determine DPDK core list for role '{0}'".format($.role_name) %>
         on-success: fail
 
       set_status_failed_get_dpdk_nics_mtu:
         publish:
           status: FAILED
-          message: "Unable to determine MTU for DPDK NIC's"
+          message: <% "Unable to determine DPDK NIC's MTU for role '{0}'".format($.role_name) %>
         on-success: fail
 
       set_status_failed_get_socket_memory:
         publish:
           status: FAILED
-          message: "Unable to determine socket memory on NUMA nodes of for DPDK NIC's"
+          message: <% "Unable to determine DPDK socket memory on NUMA nodes for role '{0}'".format($.role_name) %>
         on-success: fail
 
       set_status_failed_get_numa_nodes:
         publish:
           status: FAILED
-          message: "Unable to determine NUMA nodes for socket memory"
+          message: <% "Unable to determine available NUMA nodes for role '{0}'".format($.role_name) %>
         on-success: fail
 
       set_status_failed_get_dpdk_socket_memory:
         publish:
           status: FAILED
-          message: "Unable to determine dpdk socket memory on NUMA nodes of for DPDK NIC's"
+          message: <% "Unable to determine DPDK socket memory list on NUMA nodes for role '{0}'".format($.role_name) %>
         on-success: fail
 
       set_status_failed_get_memory_slot_info:
         publish:
           status: FAILED
-          message: "Unable to determine memory slot info on NUMA nodes of for DPDK NIC's"
+          message: <% "Unable to determine memory slot info on NUMA nodes for role '{0}'".format($.role_name) %>
         on-success: fail
 
       set_status_failed_get_dpdk_memory_channels:
         publish:
           status: FAILED
-          message: "Unable to determine dpdk memory channels on NUMA nodes of for DPDK NIC's"
+          message: <% "Unable to determine dpdk memory channels on NUMA nodes for role '{0}'".format($.role_name) %>
+        on-success: fail
+
+
+  host_derive_params:
+    description: >
+      Workflow to derive parameters for Host process.
+    input:
+      - role_name
+      - introspection_data
+      - dpdk_parameters
+      - nova_reserved_host_memory_default: 4096
+
+    output:
+      host_parameters: <% dict(concat($.role_name, 'HostCpusList') => $.get('host_cpus_list', ''), 'NovaVcpuPinSet' => $.get('nova_vcpu_pin_set', ''), 'NovaReservedHostMemory' => $.get('nova_reserved_host_memory', ''), concat($.role_name, 'KernelArgs') => $.get('kernel_args', ''), 'HostIsolatedCoreList' => $.get('host_isolated_core_list', '')) %>
+      status: <% $.get('status', 'SUCCESS') %>
+      message: <% $.get('message', '') %>
+
+    tasks:
+
+      get_cpus:
+        publish:
+          cpus: <% $.introspection_data.numa_topology.cpus %>
+        on-success:
+          - get_min_thread_on_numa_nodes: <% $.cpus %>
+          - set_status_failed_get_cpus: <% not $.cpus %>
+
+      get_min_thread_on_numa_nodes:
+        publish:
+          min_threads: <% $.cpus.groupBy($.numa_node).select(dict('numa_node' => $[0], 'min_thread' => $[1].select($.thread_siblings).flatten().min())) %>
+        on-success:
+          - get_host_cpus_list: <% $.min_threads %>
+          - set_status_failed_get_min_thread_on_numa_nodes: <% not $.min_threads %>
+
+      get_host_cpus_list:
+        publish:
+          host_cpus_list: <% let(min_threads => $.min_threads) -> $.cpus.where(let(node => $.numa_node)-> $min_threads.where($.numa_node = $node).min_thread.first(0) in $.thread_siblings).select($.thread_siblings).flatten().join(',')  %>
+        on-success:
+          - get_host_dpdk_combined_cpus: <% $.host_cpus_list %>
+          - set_status_failed_get_host_cpus_list: <% not $.host_cpus_list %>
+
+      get_host_dpdk_combined_cpus:
+        publish:
+          host_dpdk_combined_cpus: <% list($.dpdk_parameters.get('dpdk_core_list','').split(',') + $.host_cpus_list.split(',')).select(int($)) %>
+        on-success:
+          - get_nova_vcpu_pin_set: <% $.host_dpdk_combined_cpus %>
+          - set_status_failed_get_host_dpdk_combined_cpus: <% not $.host_dpdk_combined_cpus %>
+
+      get_nova_vcpu_pin_set:
+        publish:
+          nova_vcpu_pin_set: <% let(invalid_threads => $.host_dpdk_combined_cpus) -> $.cpus.select($.thread_siblings).flatten().where(not $ in $invalid_threads).join(',') %>
+        on-success:
+          - get_host_isolated_core_list: <% $.nova_vcpu_pin_set %>
+          - set_status_failed_get_nova_vcpu_pin_set: <% not $.nova_vcpu_pin_set %>
+
+      get_host_isolated_core_list:
+        publish:
+          host_isolated_core_list: <% $.dpdk_parameters.get('dpdk_core_list', '') + $.nova_vcpu_pin_set %>
+        on-success: get_nova_reserved_host_memory
+
+      get_nova_reserved_host_memory:
+        publish:
+          nova_reserved_host_memory: <% $.nova_reserved_host_memory_default %>
+        on-success: check_default_hugepage_supported
+
+      check_default_hugepage_supported:
+        publish:
+          default_hugepage_supported: <% $.introspection_data.get('inventory', {}).get('cpu', {}).get('flags', []).contains('cpu_hugepages_1g') %>
+        on-success:
+          - get_total_memory: <% $.default_hugepage_supported %>
+          - set_status_failed_check_default_hugepage_supported: <% not $.default_hugepage_supported %>
+
+      get_total_memory:
+        publish:
+          total_memory: <% $.introspection_data.get('inventory', {}).get('memory', {}).get('physical_mb', 0) %>
+        on-success:
+          - get_hugepages: <% $.total_memory %>
+          - set_status_failed_get_total_memory: <% not $.total_memory %>
+
+      get_hugepages:
+        publish:
+          hugepages: <% int((($.total_memory/1024)-4) * 0.9) %>
+        on-success:
+          - get_cpu_model: <% $.hugepages %>
+          - set_status_failed_get_hugepages: <% not $.hugepages %>
+
+      get_cpu_model:
+        publish:
+          intel_cpu_model: <% $.introspection_data.get('inventory', {}).get('cpu', {}).get('model_name', '').startsWith('Intel') %>
+        on-success: get_kernel_args
+
+      get_kernel_args:
+        publish:
+          kernel_args: <% concat('default_hugepagesz=1GB hugepagesz=1GB ', 'hugepages=', str($.hugepages), ' ',  switch($.intel_cpu_model => 'intel_iommu=on iommu=pt', not $.intel_cpu_model => '')) %>
+        on-success:
+          - set_status_failed_get_kernel_args: <% not $.kernel_args %>
+
+      set_status_failed_get_cpus:
+        publish:
+          status: FAILED
+          message: <% "Unable to determine CPU's on NUMA nodes for role '{0}'".format($.role_name) %>
+        on-success: fail
+
+      set_status_failed_get_min_thread_on_numa_nodes:
+        publish:
+          status: FAILED
+          message: <% "Unable to determine min thread on NUMA nodes for role '{0}'".format($.role_name) %>
+        on-success: fail
+
+      set_status_failed_get_host_cpus_list:
+        publish:
+          status: FAILED
+          message: <% "Unable to determine host cpus list for role '{0}'".format($.role_name) %>
+        on-success: fail
+
+      set_status_failed_get_host_dpdk_combined_cpus:
+        publish:
+          status: FAILED
+          message: <% "Unable to combine host and dpdk cpus list for role '{0}'".format($.role_name) %>
+        on-success: fail
+
+      set_status_failed_get_nova_vcpu_pin_set:
+        publish:
+          status: FAILED
+          message: <% "Unable to determine nova vcpu pin set for role '{0}'".format($.role_name) %>
+        on-success: fail
+
+      set_status_failed_check_default_hugepage_supported:
+        publish:
+          status: FAILED
+          message: <% "default huge page size 1GB is not supported for role '{0}'".format($.role_name) %>
+        on-success: fail
+
+      set_status_failed_get_total_memory:
+        publish:
+          status: FAILED
+          message: <% "Unable to determine total memory for role '{0}'".format($.role_name) %>
+        on-success: fail
+
+      set_status_failed_get_hugepages:
+        publish:
+          status: FAILED
+          message: <% "Unable to determine huge pages for role '{0}'".format($.role_name) %>
+        on-success: fail
+
+      set_status_failed_get_kernel_args:
+        publish:
+          status: FAILED
+          message: <% "Unable to determine kernel args for role '{0}'".format($.role_name) %>
         on-success: fail
