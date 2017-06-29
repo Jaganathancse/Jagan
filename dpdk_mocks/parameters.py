@@ -1,0 +1,879 @@
+# Copyright 2016 Red Hat, Inc.
+# All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License"); you may
+# not use this file except in compliance with the License. You may obtain
+# a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+# License for the specific language governing permissions and limitations
+# under the License.
+# Copyright 2106 Red Hat, Inc.
+# All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License"); you may
+# not use this file except in compliance with the License. You may obtain
+# a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+# License for the specific language governing permissions and limitations
+# under the License.
+import json
+import logging
+import re
+import uuid
+
+from heatclient import exc as heat_exc
+from mistral_lib import actions
+from swiftclient import exceptions as swiftexceptions
+
+from tripleo_common.actions import base
+from tripleo_common.actions import templates
+from tripleo_common import constants
+from tripleo_common import exception
+from tripleo_common.utils import nodes
+from tripleo_common.utils import parameters
+from tripleo_common.utils import passwords as password_utils
+from tripleo_common.utils import plan as plan_utils
+
+LOG = logging.getLogger(__name__)
+
+
+class GetParametersAction(templates.ProcessTemplatesAction):
+    """Gets list of available heat parameters."""
+
+    def run(self, context):
+
+        cached = self.cache_get(context,
+                                self.container,
+                                "tripleo.parameters.get")
+
+        if cached is not None:
+            return cached
+
+        processed_data = super(GetParametersAction, self).run(context)
+
+        # If we receive a 'Result' instance it is because the parent action
+        # had an error.
+        if isinstance(processed_data, actions.Result):
+            return processed_data
+
+        processed_data['show_nested'] = True
+
+        # respect previously user set param values
+        swift = self.get_object_client(context)
+        heat = self.get_orchestration_client(context)
+
+        try:
+            env = plan_utils.get_env(swift, self.container)
+        except swiftexceptions.ClientException as err:
+            err_msg = ("Error retrieving environment for plan %s: %s" % (
+                self.container, err))
+            LOG.exception(err_msg)
+            return actions.Result(error=err_msg)
+
+        params = env.get('parameter_defaults')
+
+        fields = {
+            'template': processed_data['template'],
+            'files': processed_data['files'],
+            'environment': processed_data['environment'],
+            'show_nested': True
+        }
+
+        result = {
+            'heat_resource_tree': heat.stacks.validate(**fields),
+            'environment_parameters': params,
+        }
+        self.cache_set(context,
+                       self.container,
+                       "tripleo.parameters.get",
+                       result)
+        return result
+
+
+class ResetParametersAction(base.TripleOAction):
+    """Provides method to delete user set parameters."""
+
+    def __init__(self, container=constants.DEFAULT_CONTAINER_NAME,
+                 key=constants.DEFAULT_PLAN_ENV_KEY):
+        super(ResetParametersAction, self).__init__()
+        self.container = container
+        self.key = key
+
+    def run(self, context):
+        swift = self.get_object_client(context)
+
+        try:
+            env = plan_utils.get_env(swift, self.container)
+        except swiftexceptions.ClientException as err:
+            err_msg = ("Error retrieving environment for plan %s: %s" % (
+                self.container, err))
+            LOG.exception(err_msg)
+            return actions.Result(error=err_msg)
+
+        try:
+            plan_utils.update_in_env(swift, env, self.key,
+                                     delete_key=True)
+        except swiftexceptions.ClientException as err:
+            err_msg = ("Error updating environment for plan %s: %s" % (
+                self.container, err))
+            LOG.exception(err_msg)
+            return actions.Result(error=err_msg)
+
+        self.cache_delete(context,
+                          self.container,
+                          "tripleo.parameters.get")
+        return env
+
+
+class UpdateParametersAction(base.TripleOAction):
+    """Updates plan environment with parameters."""
+
+    def __init__(self, parameters,
+                 container=constants.DEFAULT_CONTAINER_NAME,
+                 key=constants.DEFAULT_PLAN_ENV_KEY):
+        super(UpdateParametersAction, self).__init__()
+        self.container = container
+        self.parameters = parameters
+        self.key = key
+
+    def run(self, context):
+        swift = self.get_object_client(context)
+
+        try:
+            env = plan_utils.get_env(swift, self.container)
+        except swiftexceptions.ClientException as err:
+            err_msg = ("Error retrieving environment for plan %s: %s" % (
+                self.container, err))
+            LOG.exception(err_msg)
+            return actions.Result(error=err_msg)
+
+        try:
+            plan_utils.update_in_env(swift, env, self.key,
+                                     self.parameters)
+        except swiftexceptions.ClientException as err:
+            err_msg = ("Error updating environment for plan %s: %s" % (
+                self.container, err))
+            LOG.exception(err_msg)
+            return actions.Result(error=err_msg)
+
+        self.cache_delete(context,
+                          self.container,
+                          "tripleo.parameters.get")
+        return env
+
+
+class UpdateRoleParametersAction(UpdateParametersAction):
+    """Updates role related parameters in plan environment ."""
+
+    def __init__(self, role, container=constants.DEFAULT_CONTAINER_NAME):
+        super(UpdateRoleParametersAction, self).__init__(parameters=None,
+                                                         container=container)
+        self.role = role
+
+    def run(self, context):
+        baremetal_client = self.get_baremetal_client(context)
+        compute_client = self.get_compute_client(context)
+        self.parameters = parameters.set_count_and_flavor_params(
+            self.role, baremetal_client, compute_client)
+        return super(UpdateRoleParametersAction, self).run(context)
+
+
+class GeneratePasswordsAction(base.TripleOAction):
+    """Generates passwords needed for Overcloud deployment
+
+    This method generates passwords and ensures they are stored in the
+    plan environment. This method respects previously generated passwords and
+    adds new passwords as necessary.
+    """
+
+    def __init__(self, container=constants.DEFAULT_CONTAINER_NAME):
+        super(GeneratePasswordsAction, self).__init__()
+        self.container = container
+
+    def run(self, context):
+        heat = self.get_orchestration_client(context)
+        swift = self.get_object_client(context)
+        mistral = self.get_workflow_client(context)
+
+        try:
+            env = plan_utils.get_env(swift, self.container)
+        except swiftexceptions.ClientException as err:
+            err_msg = ("Error retrieving environment for plan %s: %s" % (
+                self.container, err))
+            LOG.exception(err_msg)
+            return actions.Result(error=err_msg)
+
+        try:
+            stack_env = heat.stacks.environment(
+                stack_id=self.container)
+        except heat_exc.HTTPNotFound:
+            stack_env = None
+
+        passwords = password_utils.generate_passwords(mistral, stack_env)
+
+        # if passwords don't yet exist in plan environment
+        if 'passwords' not in env:
+            env['passwords'] = {}
+
+        # ensure all generated passwords are present in plan env,
+        # but respect any values previously generated and stored
+        for name, password in passwords.items():
+            if name not in env['passwords']:
+                env['passwords'][name] = password
+
+        try:
+            plan_utils.put_env(swift, env)
+        except swiftexceptions.ClientException as err:
+            err_msg = "Error uploading to container: %s" % err
+            LOG.exception(err_msg)
+            return actions.Result(error=err_msg)
+
+        self.cache_delete(context,
+                          self.container,
+                          "tripleo.parameters.get")
+        return env['passwords']
+
+
+class GetPasswordsAction(base.TripleOAction):
+    """Get passwords from the environment
+
+    This method returns the list passwords which are used for the deployment.
+    It will return a merged list of user provided passwords and generated
+    passwords, giving priority to the user provided passwords.
+    """
+
+    def __init__(self, container=constants.DEFAULT_CONTAINER_NAME):
+        super(GetPasswordsAction, self).__init__()
+        self.container = container
+
+    def run(self, context):
+        swift = self.get_object_client(context)
+
+        try:
+            env = plan_utils.get_env(swift, self.container)
+        except swiftexceptions.ClientException as err:
+            err_msg = ("Error retrieving environment for plan %s: %s" % (
+                self.container, err))
+            LOG.exception(err_msg)
+            return actions.Result(error=err_msg)
+
+        parameter_defaults = env.get('parameter_defaults', {})
+        passwords = env.get('passwords', {})
+
+        return self._get_overriden_passwords(passwords, parameter_defaults)
+
+    def _get_overriden_passwords(self, env_passwords, parameter_defaults):
+        for name in constants.PASSWORD_PARAMETER_NAMES:
+            if name in parameter_defaults:
+                env_passwords[name] = parameter_defaults[name]
+        return env_passwords
+
+
+class GenerateFencingParametersAction(base.TripleOAction):
+    """Generates fencing configuration for a deployment.
+
+    :param nodes_json: list of nodes & attributes in json format
+    :param os_auth: dictionary of OS client auth data (if using pxe_ssh)
+    :param fence_action: action to take when fencing nodes
+    :param delay: time to wait before taking fencing action
+    :param ipmi_level: IPMI user level to use
+    :param ipmi_cipher: IPMI cipher suite to use
+    :param ipmi_lanplus: whether to use IPMIv2.0
+    """
+
+    def __init__(self, nodes_json, os_auth, fence_action, delay,
+                 ipmi_level, ipmi_cipher, ipmi_lanplus):
+        super(GenerateFencingParametersAction, self).__init__()
+        self.nodes_json = nodes_json
+        self.os_auth = os_auth
+        self.fence_action = fence_action
+        self.delay = delay
+        self.ipmi_level = ipmi_level
+        self.ipmi_cipher = ipmi_cipher
+        self.ipmi_lanplus = ipmi_lanplus
+
+    def run(self, context):
+        """Returns the parameters for fencing controller nodes"""
+        hostmap = nodes.generate_hostmap(self.get_baremetal_client(context),
+                                         self.get_compute_client(context))
+        fence_params = {"EnableFencing": True, "FencingConfig": {}}
+        devices = []
+
+        for node in self.nodes_json:
+            node_data = {}
+            params = {}
+            if "mac" in node:
+                # Not all Ironic drivers present a MAC address, so we only
+                # capture it if it's present
+                mac_addr = node["mac"][0]
+                node_data["host_mac"] = mac_addr
+
+                # If the MAC isn't in the hostmap, this node hasn't been
+                # provisioned, so no fencing parameters are necessary
+                if mac_addr not in hostmap:
+                    continue
+
+            # Build up fencing parameters based on which Ironic driver this
+            # node is using
+            if node["pm_type"] == "pxe_ssh":
+                # Ironic fencing driver
+                node_data["agent"] = "fence_ironic"
+                if self.fence_action:
+                    params["action"] = self.fence_action
+                params["auth_url"] = self.os_auth["auth_url"]
+                params["login"] = self.os_auth["login"]
+                params["passwd"] = self.os_auth["passwd"]
+                params["tenant_name"] = self.os_auth["tenant_name"]
+                params["pcmk_host_map"] = "%(compute_name)s:%(bm_name)s" % (
+                    {"compute_name": hostmap[mac_addr]["compute_name"],
+                     "bm_name": hostmap[mac_addr]["baremetal_name"]})
+                if self.delay:
+                    params["delay"] = self.delay
+            elif (node['pm_type'] == 'ipmi' or node["pm_type"].split('_')[1] in
+                  ("ipmitool", "ilo", "drac")):
+                # IPMI fencing driver
+                node_data["agent"] = "fence_ipmilan"
+                if self.fence_action:
+                    params["action"] = self.fence_action
+                params["ipaddr"] = node["pm_addr"]
+                params["passwd"] = node["pm_password"]
+                params["login"] = node["pm_user"]
+                params["pcmk_host_list"] = hostmap[mac_addr]["compute_name"]
+                if "pm_port" in node:
+                    params["ipport"] = node["pm_port"]
+                if self.ipmi_lanplus:
+                    params["lanplus"] = self.ipmi_lanplus
+                if self.delay:
+                    params["delay"] = self.delay
+                if self.ipmi_cipher:
+                    params["cipher"] = self.ipmi_cipher
+                if self.ipmi_level:
+                    params["privlvl"] = self.ipmi_level
+            else:
+                error = ("Unable to generate fencing parameters for %s" %
+                         node["pm_type"])
+                raise ValueError(error)
+
+            node_data["params"] = params
+            devices.append(node_data)
+
+        fence_params["FencingConfig"]["devices"] = devices
+        return {"parameter_defaults": fence_params}
+
+
+class GetFlattenedParametersAction(GetParametersAction):
+    """Get the heat stack tree and parameters in flattened structure.
+
+    This method validates the stack of the container and returns the
+    parameters and the heat stack tree. The heat stack tree is flattened
+    for easy consumption.
+    """
+
+    def __init__(self, container=constants.DEFAULT_CONTAINER_NAME):
+        super(GetFlattenedParametersAction, self).__init__(container)
+
+    def _processParams(self, flattened, params):
+        for item in params:
+            if item not in flattened['parameters']:
+                param_obj = {}
+                for key, value in params.get(item).items():
+                    camel_case_key = key[0].lower() + key[1:]
+                    param_obj[camel_case_key] = value
+                param_obj['name'] = item
+                flattened['parameters'][item] = param_obj
+        return list(params)
+
+    def _process(self, flattened, name, data):
+        key = str(uuid.uuid4())
+        value = {}
+        value.update({
+            'name': name,
+            'id': key
+        })
+        if 'Type' in data:
+            value['type'] = data['Type']
+        if 'Description' in data:
+            value['description'] = data['Description']
+        if 'Parameters' in data:
+            value['parameters'] = self._processParams(flattened,
+                                                      data['Parameters'])
+        if 'ParameterGroups' in data:
+            value['parameter_groups'] = data['ParameterGroups']
+        if 'NestedParameters' in data:
+            nested = data['NestedParameters']
+            nested_ids = []
+            for nested_key in nested.keys():
+                nested_data = self._process(flattened, nested_key,
+                                            nested.get(nested_key))
+                # nested_data will always have one key (and only one)
+                nested_ids.append(list(nested_data)[0])
+
+            value['resources'] = nested_ids
+
+        flattened['resources'][key] = value
+        return {key: value}
+
+    def run(self, context):
+        # process all plan files and create or update a stack
+        processed_data = super(GetFlattenedParametersAction, self).run(context)
+
+        # If we receive a 'Result' instance it is because the parent action
+        # had an error.
+        if isinstance(processed_data, actions.Result):
+            return processed_data
+
+        if processed_data['heat_resource_tree']:
+            flattened = {'resources': {}, 'parameters': {}}
+            self._process(flattened, 'Root',
+                          processed_data['heat_resource_tree'])
+            processed_data['heat_resource_tree'] = flattened
+
+        return processed_data
+
+
+class GetProfileOfFlavorAction(base.TripleOAction):
+    """Gets the profile name for a given flavor name.
+
+    Need flavor object to get profile name since get_keys method is
+    not available for external access. so we have created an action
+    to get profile name from flavor name.
+
+    :param flavor_name: Flavor name
+
+    :return: profile name
+    """
+
+    def __init__(self, flavor_name):
+        super(GetProfileOfFlavorAction, self).__init__()
+        self.flavor_name = flavor_name
+
+    def run(self, context):
+        compute_client = self.get_compute_client(context)
+        try:
+            return parameters.get_profile_of_flavor(self.flavor_name,
+                                                    compute_client)
+        except exception.DeriveParamsError as err:
+            LOG.error('Derive Params Error: %s', err)
+            return actions.Result(error=str(err))
+
+
+class RotateFernetKeysAction(GetPasswordsAction):
+    """Rotate fernet keys from the environment
+
+    This method rotates the fernet keys that are saved in the environment, in
+    the passwords parameter.
+    """
+
+    def __init__(self, container=constants.DEFAULT_CONTAINER_NAME):
+        super(RotateFernetKeysAction, self).__init__()
+        self.container = container
+
+    def run(self, context):
+        swift = self.get_object_client(context)
+
+        try:
+            env = plan_utils.get_env(swift, self.container)
+        except swiftexceptions.ClientException as err:
+            err_msg = ("Error retrieving environment for plan %s: %s" % (
+                self.container, err))
+            LOG.exception(err_msg)
+            return actions.Result(error=err_msg)
+
+        parameter_defaults = env.get('parameter_defaults', {})
+        passwords = self._get_overriden_passwords(env.get('passwords', {}),
+                                                  parameter_defaults)
+
+        next_index = self.get_next_index(passwords['KeystoneFernetKeys'])
+        keys_map = self.rotate_keys(passwords['KeystoneFernetKeys'],
+                                    next_index)
+        max_keys = self.get_max_keys_value(parameter_defaults)
+        keys_map = self.purge_excess_keys(max_keys, keys_map)
+
+        env['passwords']['KeystoneFernetKeys'] = keys_map
+
+        try:
+            plan_utils.put_env(swift, env)
+        except swiftexceptions.ClientException as err:
+            err_msg = "Error uploading to container: %s" % err
+            LOG.exception(err_msg)
+            return actions.Result(error=err_msg)
+
+        self.cache_delete(context,
+                          self.container,
+                          "tripleo.parameters.get")
+
+        return keys_map
+
+    @staticmethod
+    def get_key_index_from_path(path):
+        return int(path[path.rfind('/') + 1:])
+
+    def get_next_index(self, keys_map):
+        return self.get_key_index_from_path(
+            max(keys_map, key=self.get_key_index_from_path)) + 1
+
+    def get_key_path(self, index):
+        return password_utils.KEYSTONE_FERNET_REPO + str(index)
+
+    def rotate_keys(self, keys_map, next_index):
+        next_index_path = self.get_key_path(next_index)
+        zero_index_path = self.get_key_path(0)
+
+        # promote staged key to be new primary
+        keys_map[next_index_path] = keys_map[zero_index_path]
+        # Set new staged key
+        keys_map[zero_index_path] = {
+            'content': password_utils.create_keystone_credential()}
+        return keys_map
+
+    def get_max_keys_value(self, parameter_defaults):
+        # The number of max keys should always be positive. The minimum amount
+        # of keys is 3.
+        return max(parameter_defaults.get('KeystoneFernetMaxActiveKeys', 5), 3)
+
+    def purge_excess_keys(self, max_keys, keys_map):
+        current_repo_size = len(keys_map)
+        if current_repo_size <= max_keys:
+            return keys_map
+        key_paths = sorted(keys_map.keys(), key=self.get_key_index_from_path)
+
+        keys_to_be_purged = current_repo_size - max_keys
+
+        for key_path in key_paths[1:keys_to_be_purged + 1]:
+            del keys_map[key_path]
+        return keys_map
+
+
+class GetNetworkConfigAction(templates.ProcessTemplatesAction):
+    """Gets network configuration details from available heat parameters."""
+
+    def __init__(self, role_name, container=constants.DEFAULT_CONTAINER_NAME):
+        super(GetNetworkConfigAction, self).__init__(container=container)
+        self.role_name = role_name
+
+    def run(self, context):
+
+        processed_data = super(GetNetworkConfigAction, self).run(context)
+
+        # If we receive a 'Result' instance it is because the parent action
+        # had an error.
+        if isinstance(processed_data, actions.Result):
+            return processed_data
+
+        fields = {
+            'template': processed_data['template'],
+            'files': processed_data['files'],
+            'environment': processed_data['environment'],
+            'stack_name': self.container,
+        }
+        orc = self.get_orchestration_client(context)
+        preview_data = orc.stacks.preview(**fields)
+        result = self.getNetworkConfig(preview_data, self.container,
+                                       self.role_name)
+        return result
+
+    def getNetworkConfig(self, preview_data, stack_name, role_name):
+        result = None
+        if preview_data:
+            for res in preview_data.resources:
+                net_script = self.processPreviewList(res,
+                                                     stack_name,
+                                                     role_name)
+                if net_script:
+                    ns_len = len(net_script)
+                    start_index = (net_script.find(
+                        "echo '{\"network_config\"", 0, ns_len) + 6)
+                    end_index = net_script.find("'", start_index, ns_len)
+                    if (end_index > start_index):
+                        net_config = net_script[start_index:end_index]
+                        if net_config:
+                            result = json.loads(net_config)
+                    break
+        return result
+
+    def processPreviewList(self, res, stack_name, role_name):
+        if type(res) == list:
+            for item in res:
+                out = self.processPreviewList(item, stack_name, role_name)
+                if out:
+                    return out
+        elif type(res) == dict:
+            res_stack_name = stack_name + '-' + role_name
+            if res['resource_name'] == "OsNetConfigImpl" and \
+                res['resource_identity'] and \
+                res_stack_name in res['resource_identity']['stack_name']:
+                return res['properties']['config']
+        return None
+
+
+class GetDpdkNicsNumaInfoAction(base.TripleOAction):
+    """Gets the DPDK NICs with MTU for NUMA nodes.
+
+    :param network_configs: For network config
+    :param inspect_data: For introspection data
+
+    :return: DPDK NICs NUMA nodes info
+    """
+
+    def __init__(self, network_configs, inspect_data, mtu_default=1500):
+        super(GetDpdkNicsNumaInfoAction, self).__init__()
+        self.network_configs = network_configs
+        self.inspect_data = inspect_data
+        self.mtu_default = mtu_default
+
+    # TODO(jpalanis): Expose this utility from os-net-config to sort
+    # active nics
+    def _natural_sort_key(self, s):
+        nsre = re.compile('([0-9]+)')
+        return [int(text) if text.isdigit() else text
+                for text in re.split(nsre, s)]
+
+    # TODO(jpalanis): Expose this utility from os-net-config to sort
+    # active nics
+    def _is_embedded_nic(self, nic):
+        if (nic.startswith('em') or nic.startswith('eth') or
+                nic.startswith('eno')):
+            return True
+        return False
+
+    # TODO(jpalanis): Expose this utility from os-net-config to sort
+    # active nics
+    def _ordered_nics(self, interfaces):
+        embedded_nics = []
+        nics = []
+        for iface in interfaces:
+            nic = iface.get('name', '')
+            if self._is_embedded_nic(nic):
+                embedded_nics.append(nic)
+            else:
+                nics.append(nic)
+        active_nics = (sorted(
+            embedded_nics, key=self._natural_sort_key) +
+            sorted(nics, key=self._natural_sort_key))
+        return active_nics
+
+    def find_numa_node_id(self, numa_nics, nic_name):
+        for nic_info in numa_nics:
+            if nic_info.get('name', '') == nic_name:
+                return nic_info.get('numa_node', None)
+        return None
+
+    def get_physical_iface_name(self, ordered_nics, nic_name):
+        if nic_name.startswith('nic'):
+            # Nic numbering, find the actual interface name
+            nic_number = int(nic_name.replace('nic', ''))
+            if nic_number > 0:
+                iface_name = ordered_nics[nic_number - 1]
+                return iface_name
+        return nic_name
+
+    def get_dpdk_interfaces(self, dpdk_objs):
+        mtu = self.mtu_default
+        dpdk_ifaces = []
+        for dpdk_obj in dpdk_objs:
+            obj_type = dpdk_obj.get('type')
+            mtu = dpdk_obj.get('mtu', self.mtu_default)
+            if obj_type == 'ovs_dpdk_port':
+                # Member interfaces of ovs_dpdk_port
+                dpdk_ifaces.extend(dpdk_obj.get('members', []))
+            elif obj_type == 'ovs_dpdk_bond':
+                # ovs_dpdk_bond will have multiple ovs_dpdk_ports
+                for bond_member in dpdk_obj.get('members', []):
+                    if bond_member.get('type') == 'ovs_dpdk_port':
+                        dpdk_ifaces.extend(bond_member.get('members', []))
+        return (dpdk_ifaces, mtu)
+
+    def run(self, context):
+        interfaces = self.inspect_data.get('inventory',
+                                           {}).get('interfaces', [])
+        if not interfaces:
+            msg = 'Introspection data does not have inventory.interfaces'
+            return actions.Result(error=msg)
+
+        numa_nics = self.inspect_data.get('numa_topology',
+                                          {}).get('nics', [])
+        if not numa_nics:
+            msg = 'Introspection data does not have numa_topology.nics'
+            return actions.Result(error=msg)
+
+        active_interfaces = [iface for iface in interfaces
+                             if iface.get('has_carrier', False)]
+        if not active_interfaces:
+            msg = 'Unable to determine active interfaces (has_carrier)'
+            return actions.Result(error=msg)
+
+        dpdk_nics_numa_info = []
+        ordered_nics = self._ordered_nics(active_interfaces)
+        for config in self.network_configs:
+            if config.get('type', '') == 'ovs_user_bridge':
+                members = config.get('members', [])
+                dpdk_ifaces, mtu = self.get_dpdk_interfaces(members)
+                for dpdk_iface in dpdk_ifaces:
+                    name = dpdk_iface.get('name', '')
+                    phy_name = self.get_physical_iface_name(
+                        ordered_nics, name)
+                    node = self.find_numa_node_id(numa_nics, phy_name)
+                    if not node:
+                        msg = ('Unable to determine NUMA node for '
+                               'DPDK NIC: %s' % phy_name)
+                        return actions.Result(error=msg)
+
+                    dpdk_nic_info = {'name': phy_name,
+                                     'numa_node': node,
+                                     'mtu': mtu}
+                    dpdk_nics_numa_info.append(dpdk_nic_info)
+        return dpdk_nics_numa_info
+
+
+class GetDpdkCoreListAction(base.TripleOAction):
+    """Gets the DPDK Core List.
+
+    :param inspect_data: For introspection data
+    :param numa_nodes_cores_count For NUMA nodes cores count
+
+    :return: DPDK Core List
+    """
+
+    def __init__(self, inspect_data, numa_nodes_cores_count):
+        super(GetDpdkCoreListAction, self).__init__()
+        self.inspect_data = inspect_data
+        self.numa_nodes_cores_count = numa_nodes_cores_count
+
+    def run(self, context):
+        dpdk_core_list = []
+        numa_cpus_info = self.inspect_data.get('numa_topology',
+                                               {}).get('cpus', [])
+
+        if not numa_cpus_info:
+            msg = 'Introspection data does not have numa_topology.cpus'
+            return actions.Result(error=msg)
+
+        if not self.numa_nodes_cores_count:
+            msg = 'Each NUMA nodes threads count is missing'
+            return actions.Result(error=msg)
+
+        numa_nodes_min = {}
+        numa_nodes_threads = {}
+        for cpu in numa_cpus_info:
+            if not cpu['numa_node'] in numa_nodes_threads:
+                numa_nodes_threads[cpu['numa_node']] = []
+            numa_nodes_threads[cpu['numa_node']].extend(cpu['thread_siblings'])
+
+        for node_cores_count in self.numa_nodes_cores_count:
+            node = self.numa_nodes_cores_count.index(node_cores_count)
+            numa_node_min = min(numa_nodes_threads[node])
+            cores_count = node_cores_count
+            for cpu in numa_cpus_info:
+                if cpu['numa_node'] == node:
+                    if not numa_nodes_min in cpu['thread_siblings']:
+                        dpdk_core_list.extend(cpu['thread_siblings'])
+                        cores_count -= 1
+                        if cores_count == 0:
+                            break
+        return ','.join([str(thread) for thread in dpdk_core_list])
+
+
+class GetHostCpusListAction(base.TripleOAction):
+    """Gets the Host CPUs List.
+
+    :param inspect_data: For introspection data
+
+    :return: Host CPUs List
+    """
+
+    def __init__(self, inspect_data):
+        super(GetHostCpusListAction, self).__init__()
+        self.inspect_data = inspect_data
+
+    def run(self, context):
+        host_cpus_list = []
+        numa_cpus_info = self.inspect_data.get('numa_topology',
+                                               {}).get('cpus', [])
+
+        if not numa_cpus_info:
+            msg = 'Introspection data does not have numa_topology.cpus'
+            return actions.Result(error=msg)
+
+        numa_nodes_min = {}
+        numa_nodes_threads = {}
+        for cpu in numa_cpus_info:
+            if not cpu['numa_node'] in numa_nodes_threads:
+                numa_nodes_threads[cpu['numa_node']] = []
+            numa_nodes_threads[cpu['numa_node']].extend(
+                cpu['thread_siblings'])
+
+        for numa_node in numa_nodes_threads.keys():
+            node = int(numa_node)
+            numa_node_min = min(numa_nodes_threads[numa_node])
+            for cpu in numa_cpus_info:
+                if cpu['numa_node'] == node:
+                    if numa_node_min in cpu['thread_siblings']:
+                        host_cpus_list.extend(cpu['thread_siblings'])
+                        break
+
+        return ','.join([str(thread) for thread in host_cpus_list])
+
+
+class GetDpdkSocketMemoryAction(base.TripleOAction):
+    """Gets the DPDK Socket Memory List.
+
+    :param dpdk_nics_numa_info: For DPDK nics numa info
+    :param numa_nodes: For list of numa nodes
+    :param overhead: For overhead value
+    :param packet_size_in_buffer: For packet size in buffer
+    :param minimum_socket_memory: For minimum socket memory
+
+    :return: DPDK Socket Memory List
+    """
+    def __init__(self, dpdk_nics_numa_info, numa_nodes,
+                 overhead, packet_size_in_buffer,
+                 minimum_socket_memory=1024):
+        super(GetDpdkSocketMemoryAction, self).__init__()
+        self.dpdk_nics_numa_info = dpdk_nics_numa_info
+        self.numa_nodes = numa_nodes
+        self.overhead = overhead
+        self.packet_size_in_buffer = packet_size_in_buffer
+        self.minimum_socket_memory = minimum_socket_memory
+
+    def calculate_node_socket_memory(
+        self, numa_node, dpdk_nics_numa_info, overhead,
+            packet_size_in_buffer, minimum_socket_memory):
+        distinct_mtu_per_node = []
+        socket_memory = 0
+        for nics_info in dpdk_nics_numa_info:
+            if (numa_node == nics_info['numa_node'] and
+                    not nics_info['mtu'] in distinct_mtu_per_node):
+                distinct_mtu_per_node.append(nics_info['mtu'])
+                socket_memory += (((nics_info['mtu'] + overhead)
+                                  * packet_size_in_buffer) /
+                                  (1024 * 1024))
+        # For Non DPDK numa node
+        if socket_memory == 0:
+            socket_memory = minimum_socket_memory
+        else:
+            socket_memory += 500
+        socket_memory_in_gb = (socket_memory / 1024)
+        if socket_memory % 1024 > 0:
+            socket_memory_in_gb += 1
+        return (socket_memory_in_gb * 1024)
+
+    def run(self, context):
+        dpdk_socket_memory_list = []
+        for node in self.numa_nodes:
+            socket_mem = self.calculate_node_socket_memory(
+                node, self.dpdk_nics_numa_info, self.overhead,
+                self.packet_size_in_buffer,
+                self.minimum_socket_memory)
+            dpdk_socket_memory_list.append(socket_mem)
+
+        return ','.join([str(sm) for sm in dpdk_socket_memory_list])
