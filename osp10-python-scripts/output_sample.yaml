@@ -1,0 +1,10 @@
+$ python derive_params.py '{"node_uuid": "461006ef-2edd-4e10-991e-aa662b9488f2", "dpdk_nics": [{"nic": "p1p1", "mtu": 8000}]}'
+Validating user inputs..
+{u'node_uuid': u'461006ef-2edd-4e10-991e-aa662b9488f2', u'dpdk_nics': [{u'nic': u'p1p1', u'mtu': 8000}]}
+Deriving DPDK parameters..
+DpdkCoreList: 7,33,40,51,77,84
+HostCpusList: 0-1,44-45
+HostIsolatedCpusList: 2-43,46-87
+NeutronDpdkSocketMemory: 2048,3072
+NovaCpusList: 2-6,8-32,34-39,41-43,46-50,52-76,78-83,85-87
+kernal_args: default_hugepagesz=1GB hugepagesz=1G hugepages=126  isolcpus=2-43,46-87
