@@ -55,6 +55,7 @@ def get_dpdk_core_list(hw_data, dpdk_nics_numa_info, dpdk_nic_numa_cores_count):
                         break
     return ','.join([str(thread) for thread in dpdk_core_list])
 
+
 # Gets host cpus
 def get_host_cpus_list(hw_data):
     host_cpus_list = []
@@ -86,11 +87,13 @@ def get_host_cpus_list(hw_data):
 
     return ','.join([str(thread) for thread in host_cpus_list])
 
+
 # Computes round off MTU value in bytes
 # example: MTU value 9000 into 9216 bytes
 def roundup_mtu_bytes(mtu):
     max_div_val = int(math.ceil(float(mtu) / float(1024)))
     return (max_div_val * 1024)
+
 
 # Calculates socket memory for a NUMA node
 def calculate_node_socket_memory(numa_node, dpdk_nics_numa_info,
@@ -121,6 +124,7 @@ def calculate_node_socket_memory(numa_node, dpdk_nics_numa_info,
         socket_memory_in_gb += 1
     return (socket_memory_in_gb * 1024)
 
+
 # Gets the socket memory
 def get_dpdk_socket_memory(hw_data, dpdk_nics_numa_info, minimum_socket_memory=1500):
     dpdk_socket_memory_list = []
@@ -136,6 +140,7 @@ def get_dpdk_socket_memory(hw_data, dpdk_nics_numa_info, minimum_socket_memory=1
         dpdk_socket_memory_list.append(socket_mem)
 
     return ','.join([str(sm) for sm in dpdk_socket_memory_list])
+
 
 # Gets nova cpus
 def get_nova_cpus_list(hw_data, dpdk_cpus, host_cpus):
@@ -153,11 +158,13 @@ def get_nova_cpus_list(hw_data, dpdk_cpus, host_cpus):
     
     return ','.join([str(thread) for thread in nova_cpus_list])
 
+
 # Gets host isolated cpus
 def get_host_isolated_cpus_list(dpdk_cpus, nova_cpus):
     host_isolated_cpus_list = dpdk_cpus.split(',')
     host_isolated_cpus_list.extend(nova_cpus.split(','))
     return ','.join([str(thread) for thread in host_isolated_cpus_list])
+
 
 # Gets NUMA info like NIC name, node and MTU for DPDK NICs
 def get_dpdk_nics_numa_info(hw_data, dpdk_nics_info):
@@ -176,6 +183,7 @@ def get_dpdk_nics_numa_info(hw_data, dpdk_nics_info):
             raise Exception("Invalid DPDK NIC '%(nic)s'" % {'nic': dpdk_nic['nic']})
     return dpdk_nics_numa_info
 
+
 # Gets distinct NUMA nodes in sorted order
 def get_numa_nodes(hw_data):
     nics = hw_data.get('numa_topology', {}).get('nics', [])
@@ -184,6 +192,7 @@ def get_numa_nodes(hw_data):
         if not nic['numa_node'] in numa_nodes:
             numa_nodes.append(nic['numa_node'])
     return sorted(numa_nodes)
+
 
 # Derives kernel_args parameter
 def get_kernel_args(hw_data, hugepage_alloc_perc, isol_cpus):
@@ -203,10 +212,12 @@ def get_kernel_args(hw_data, hugepage_alloc_perc, isol_cpus):
                                                'isol_cpus': isol_cpus})
     return kernel_args
 
+
 # Checks default 1GB hugepages support
 def is_supported_default_hugepages(hw_data):
     flags = hw_data.get('inventory', {}).get('cpu', {}).get('flags', [])
     return ('pdpe1gb' in flags)
+
 
 # Converts number format cpus into range format
 def convert_number_to_range_list(num_list):
@@ -228,13 +239,19 @@ def convert_number_to_range_list(num_list):
 
     return ','.join(range_list)
 
+
 # Validates the user inputs
 def vaildate_user_input(user_input):
     print(user_input)
+
     if not 'node_uuid' in user_input.keys():
         raise Exception("node UUID is missing in user input!");
+
     if not 'dpdk_nics' in user_input.keys():
         raise Exception("DPDK NIC's and MTU info are missing in user input!");
+    elif type(user_input['dpdk_nics']) is not list:
+        raise Exception("DPDK NIC's and MTU info is invalid!")
+
     for key in user_input.keys():
         if not key in ['node_uuid', 'dpdk_nics',
                        'num_phy_cores_per_numa_node_for_pmd',
