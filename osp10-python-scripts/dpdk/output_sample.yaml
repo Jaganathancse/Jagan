@@ -1,0 +1,11 @@
+$ python dpdk_derive_params.py '{"node_uuid": "89c50fce-d6ac-4027-ba54-7ee222b946df", "dpdk_nics": [{"nic": "enp132s0f0", "mtu": 1500}], "num_phy_cores_per_numa_node_for_pmd": 1, "huge_page_allocation_percentage": 50}'
+Validating user inputs..
+{u'huge_page_allocation_percentage': 50, u'node_uuid': u'89c50fce-d6ac-4027-ba54-7ee222b946df', u'num_phy_cores_per_numa_node_for_pmd': 1, u'dpdk_nics': [{u'nic': u'enp132s0f0', u'mtu': 1500}]}
+Deriving DPDK parameters based on node: 89c50fce-d6ac-4027-ba54-7ee222b946df
+ComputeKernelArgs: intel_iommu=on default_hugepagesz=1GB hugepagesz=1G hugepages=126
+HostCpusList: 0-1,44-45
+HostIsolatedCoreList: 2-43,46-87
+NeutronDpdkCoreList: 33,40,77,84
+NeutronDpdkSocketMemory: 2048,2048
+NovaReservedHostMemory: 4096
+NovaVcpuPinSet: 2-32,34-39,41-43,46-76,78-83,85-87

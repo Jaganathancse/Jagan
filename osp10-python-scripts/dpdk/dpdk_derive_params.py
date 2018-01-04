@@ -15,18 +15,22 @@ def get_introspection_data(node_uuid):
 # Gets the DPDK PMD core list
 # Find the right logical CPUs to be allocated along with its
 # siblings for the PMD core list
-def get_dpdk_core_list(hw_data, dpdk_nics_numa_info, dpdk_nic_numa_cores_count):
+def get_dpdk_core_list(hw_data, dpdk_nics_numa_info,
+                       dpdk_nic_numa_cores_count):
     dpdk_core_list = []
     nics = hw_data.get('numa_topology', {}).get('nics', {})
     cpus = hw_data.get('numa_topology', {}).get('cpus', {})
-    dpdk_nics_numa_nodes = [dpdk_nic['numa_node'] for dpdk_nic in dpdk_nics_numa_info]
+    dpdk_nics_numa_nodes = [dpdk_nic['numa_node']
+                            for dpdk_nic in dpdk_nics_numa_info]
 
     if not nics:
-       raise Exception('Introspection data does not have numa_topology.nics')
+       raise Exception('Introspection data does not '
+                       'have numa_topology.nics')
 
     numa_cores = {}
     if not cpus:
-       raise Exception('Introspection data does not have numa_topology.cpus')
+       raise Exception('Introspection data does not '
+                       'have numa_topology.cpus')
 
     numa_nodes = get_numa_nodes(hw_data)
     for node in numa_nodes:
@@ -126,7 +130,8 @@ def calculate_node_socket_memory(numa_node, dpdk_nics_numa_info,
 
 
 # Gets the socket memory
-def get_dpdk_socket_memory(hw_data, dpdk_nics_numa_info, minimum_socket_memory=1500):
+def get_dpdk_socket_memory(hw_data, dpdk_nics_numa_info,
+                           minimum_socket_memory=1500):
     dpdk_socket_memory_list = []
     overhead = 800
     packet_size_in_buffer = 4096 * 64
@@ -180,7 +185,8 @@ def get_dpdk_nics_numa_info(hw_data, dpdk_nics_info):
                                  'mtu': dpdk_nic['mtu']}
                 dpdk_nics_numa_info.append(dpdk_nic_info);
         if not valid_dpdk_nic:
-            raise Exception("Invalid DPDK NIC '%(nic)s'" % {'nic': dpdk_nic['nic']})
+            raise Exception("Invalid DPDK NIC "
+                            "'%(nic)s'" % {'nic': dpdk_nic['nic']})
     return dpdk_nics_numa_info
 
 
@@ -195,21 +201,19 @@ def get_numa_nodes(hw_data):
 
 
 # Derives kernel_args parameter
-def get_kernel_args(hw_data, hugepage_alloc_perc, isol_cpus):
+def get_kernel_args(hw_data, hugepage_alloc_perc):
     if not is_supported_default_hugepages(hw_data):
         raise Exception("default huge page size 1GB is not supported")
 
     total_memory = hw_data.get('inventory', {}).get('memory', {}).get('physical_mb', 0)
     hugepages = int(float((total_memory / 1024) - 4) * (float(hugepage_alloc_perc) / float(100)))
     iommu_info = ''
-    cpu_model = hw_data.get('inventory', {}).get('model_name', '')
+    cpu_model = hw_data.get('inventory', {}).get('cpu', '').get('model_name', '')
     if cpu_model.startswith('Intel'):
-        iommu_info = 'intel_iommu=on iommu=pt'
-    kernel_args = ('default_hugepagesz=1GB hugepagesz=1G '
-                   'hugepages=%(hugepages)d %(iommu_info)s '
-                   'isolcpus=%(isol_cpus)s' % {'hugepages': hugepages,
-                                               'iommu_info': iommu_info,
-                                               'isol_cpus': isol_cpus})
+        iommu_info = 'intel_iommu=on '
+    kernel_args = iommu_info
+    kernel_args += ('default_hugepagesz=1GB hugepagesz=1G '
+                   'hugepages=%(hugepages)d' % {'hugepages': hugepages})
     return kernel_args
 
 
@@ -258,6 +262,7 @@ def vaildate_user_input(user_input):
                        'huge_page_allocation_percentage']:
             raise Exception("Invalid user input '%(key)s'" % {'key': key})
 
+
 if __name__ == '__main__':
     parameters = {}
     try:
@@ -287,13 +292,14 @@ if __name__ == '__main__':
         isol_cpus = get_host_isolated_cpus_list(dpdk_cpus, nova_cpus)
         host_mem = 4096
         isol_cpus = convert_number_to_range_list(isol_cpus)
-        kernel_args = get_kernel_args(hw_data, hugepage_alloc_perc, isol_cpus)
-        parameters['DpdkCoreList'] = convert_number_to_range_list(dpdk_cpus)
+        kernel_args = get_kernel_args(hw_data, hugepage_alloc_perc)
+        parameters['NeutronDpdkCoreList'] = convert_number_to_range_list(dpdk_cpus)
         parameters['HostCpusList'] = convert_number_to_range_list(host_cpus)
         parameters['NeutronDpdkSocketMemory'] = dpdk_socket_memory
-        parameters['NovaCpusList'] = convert_number_to_range_list(nova_cpus)
-        parameters['HostIsolatedCpusList'] = isol_cpus
-        parameters['kernal_args'] = kernel_args
+        parameters['NovaVcpuPinSet'] = convert_number_to_range_list(nova_cpus)
+        parameters['NovaReservedHostMemory'] = host_mem
+        parameters['HostIsolatedCoreList'] = isol_cpus
+        parameters['ComputeKernelArgs'] = kernel_args
         # prints the derived DPDK parameters
         print(yaml.safe_dump(parameters, default_flow_style=False))
     except Exception as exc:
